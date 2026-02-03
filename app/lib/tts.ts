@@ -1,99 +1,73 @@
-// app/lib/tts.ts
+'use client';
+
 type SpeakOptions = {
-  lang?: string;         // 'fr-FR' o 'es-MX', etc.
-  voiceURI?: string;     // el voiceURI elegido en el selector
-  rate?: number;
-  pitch?: number;
-  volume?: number;
+  lang?: 'es-ES' | 'es-MX' | 'fr-FR';
+  rate?: number;  // 0.1–10 (normal 1)
+  pitch?: number; // 0–2 (normal 1)
+  volume?: number; // 0–1 (normal 1)
 };
 
-let preferredVoiceURI: string | null = null;
-
-export function setPreferredVoiceURI(uri: string | null) {
-  preferredVoiceURI = uri;
-  try {
-    if (uri) localStorage.setItem('tts_voice_uri', uri);
-    else localStorage.removeItem('tts_voice_uri');
-  } catch {}
+function isBrowser() {
+  return typeof window !== 'undefined' && typeof window.speechSynthesis !== 'undefined';
 }
 
-export function getPreferredVoiceURI() {
-  try {
-    return localStorage.getItem('tts_voice_uri');
-  } catch {
-    return null;
+function pickBestVoice(lang: string, voices: SpeechSynthesisVoice[]) {
+  // Preferencias por idioma
+  const preferredLocales = lang.startsWith('fr')
+    ? ['fr-FR', 'fr']
+    : ['es-MX', 'es-ES', 'es'];
+
+  // 1) Match exacto por lang
+  for (const pref of preferredLocales) {
+    const v = voices.find((x) => (x.lang || '').toLowerCase().startsWith(pref.toLowerCase()));
+    if (v) return v;
   }
+
+  // 2) Fallback: cualquier voz que contenga el idioma
+  const generic = voices.find((x) => (x.lang || '').toLowerCase().includes(lang.split('-')[0].toLowerCase()));
+  if (generic) return generic;
+
+  // 3) Último recurso: la primera
+  return voices[0] ?? null;
 }
 
-export function listVoices(): Promise<SpeechSynthesisVoice[]> {
-  if (typeof window === 'undefined') return Promise.resolve([]);
+async function getVoicesSafe(): Promise<SpeechSynthesisVoice[]> {
+  if (!isBrowser()) return [];
+
   const synth = window.speechSynthesis;
+  let voices = synth.getVoices();
 
-  const v = synth.getVoices();
-  if (v && v.length > 0) return Promise.resolve(v);
+  // En algunos navegadores, getVoices() viene vacío hasta que se dispara onvoiceschanged
+  if (voices.length > 0) return voices;
 
-  return new Promise((resolve) => {
-    const handler = () => {
-      const voices = synth.getVoices();
-      synth.onvoiceschanged = null;
-      resolve(voices || []);
+  voices = await new Promise<SpeechSynthesisVoice[]>((resolve) => {
+    const timer = window.setTimeout(() => resolve(synth.getVoices()), 800);
+    synth.onvoiceschanged = () => {
+      window.clearTimeout(timer);
+      resolve(synth.getVoices());
     };
-    synth.onvoiceschanged = handler;
-
-    // fallback por si el evento tarda
-    setTimeout(() => resolve(synth.getVoices() || []), 500);
   });
-}
 
-function pickBestVoice(voices: SpeechSynthesisVoice[], lang: string, voiceURI?: string | null) {
-  const normLang = (lang || '').toLowerCase();
-
-  // 1) Si el usuario eligió una voz concreta, úsala
-  if (voiceURI) {
-    const exact = voices.find(v => v.voiceURI === voiceURI);
-    if (exact) return exact;
-  }
-
-  // 2) Preferir voces que coincidan con el idioma (fr-FR, es-MX, etc.)
-  const exactLang = voices.find(v => (v.lang || '').toLowerCase() === normLang);
-  if (exactLang) return exactLang;
-
-  const startsLang = voices.find(v => (v.lang || '').toLowerCase().startsWith(normLang.split('-')[0]));
-  if (startsLang) return startsLang;
-
-  // 3) Preferir voces “buenas” típicas (Microsoft / Google) si están
-  const goodByName = voices.find(v =>
-    ((v.lang || '').toLowerCase().startsWith(normLang.split('-')[0])) &&
-    /microsoft|google/i.test(v.name)
-  );
-  if (goodByName) return goodByName;
-
-  // 4) Último recurso
-  return voices[0] || null;
+  return voices;
 }
 
 export async function speak(text: string, options: SpeakOptions = {}) {
-  if (typeof window === 'undefined') return;
+  if (!isBrowser()) return;
 
-  const synth = window.speechSynthesis;
-  if (!synth) return;
+  const { lang = 'es-ES', rate = 1, pitch = 1, volume = 1 } = options;
 
-  // cancela cualquier voz anterior (evita que se “encime”)
-  synth.cancel();
+  // Cancela cualquier habla anterior para que no se encime
+  window.speechSynthesis.cancel();
 
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = options.lang || 'fr-FR';
-  u.rate = options.rate ?? 1;
-  u.pitch = options.pitch ?? 1;
-  u.volume = options.volume ?? 1;
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = lang;
+  utter.rate = rate;
+  utter.pitch = pitch;
+  utter.volume = volume;
 
-  const stored = getPreferredVoiceURI();
-  const uriToUse = options.voiceURI ?? preferredVoiceURI ?? stored ?? null;
+  const voices = await getVoicesSafe();
+  const best = pickBestVoice(lang, voices);
+  if (best) utter.voice = best;
 
-  const voices = await listVoices();
-  const chosen = pickBestVoice(voices, u.lang, uriToUse);
-
-  if (chosen) u.voice = chosen;
-
-  synth.speak(u);
+  window.speechSynthesis.speak(utter);
 }

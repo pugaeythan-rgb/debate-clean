@@ -1,138 +1,138 @@
-'use client';
+// app/lib/tts.ts
+// Utilidad TTS (SpeechSynthesis) con:
+// - selección de voz entendible (fr/es)
+// - soporte voiceURI opcional (para forzar voz)
+// - espera a que carguen voces
+// - cancelación previa para que no se empalmen audios
 
-type SpeakOptions = {
-  lang?: string;      // 'fr-FR' o 'es-MX' etc.
-  rate?: number;      // 0.1 - 10 (normal 1)
-  pitch?: number;     // 0 - 2 (normal 1)
-  volume?: number;    // 0 - 1 (normal 1)
+export type SpeakOptions = {
+  lang?: string;      // 'fr-FR' | 'es-ES' | 'es-MX' ...
+  rate?: number;      // 0.1 - 10 (1 = normal)
+  pitch?: number;     // 0 - 2 (1 = normal)
+  volume?: number;    // 0 - 1 (1 = normal)
+  voiceURI?: string;  // forzar una voz exacta si existe
 };
 
-const STORAGE_KEY = 'tts_preferred_voice_uri_v1';
+const STORAGE_KEY = 'debate_preferred_voice_uri_v1';
 
-function isBrowser() {
-  return typeof window !== 'undefined' && typeof window.speechSynthesis !== 'undefined';
-}
-
-/**
- * Espera a que el navegador cargue las voces (en Chrome a veces tarda).
- */
-function waitForVoices(timeoutMs = 2500): Promise<SpeechSynthesisVoice[]> {
-  return new Promise((resolve) => {
-    if (!isBrowser()) return resolve([]);
-
-    const synth = window.speechSynthesis;
-    const existing = synth.getVoices();
-    if (existing && existing.length > 0) return resolve(existing);
-
-    let done = false;
-
-    const finish = () => {
-      if (done) return;
-      done = true;
-      try {
-        synth.removeEventListener('voiceschanged', onChanged);
-      } catch {}
-      resolve(synth.getVoices() || []);
-    };
-
-    const onChanged = () => finish();
-
-    try {
-      synth.addEventListener('voiceschanged', onChanged);
-    } catch {}
-
-    // fallback por si no dispara el evento
-    setTimeout(() => finish(), timeoutMs);
-  });
-}
-
-/**
- * Devuelve lista simple de voces disponibles
- */
-export async function listVoices() {
-  const voices = await waitForVoices();
-  return voices.map((v) => ({
-    name: v.name,
-    lang: v.lang,
-    voiceURI: v.voiceURI,
-    localService: v.localService,
-    default: v.default,
-  }));
-}
-
-/**
- * Guarda la voz preferida (por voiceURI) en localStorage
- */
-export function setPreferredVoiceURI(voiceURI: string) {
-  if (!isBrowser()) return;
+// Guardar / leer voz preferida (si quieres persistencia)
+export function setPreferredVoiceURI(uri: string) {
   try {
-    window.localStorage.setItem(STORAGE_KEY, voiceURI);
+    localStorage.setItem(STORAGE_KEY, uri);
   } catch {}
 }
 
-/**
- * Lee la voz preferida (voiceURI) de localStorage
- */
 export function getPreferredVoiceURI(): string | null {
-  if (!isBrowser()) return null;
   try {
-    return window.localStorage.getItem(STORAGE_KEY);
+    return localStorage.getItem(STORAGE_KEY);
   } catch {
     return null;
   }
 }
 
-/**
- * Selecciona la mejor voz: primero la preferida por URI,
- * si no existe, intenta por idioma (fr o es), si no, primera disponible.
- */
-function pickVoice(voices: SpeechSynthesisVoice[], preferredURI: string | null, lang: string) {
-  if (!voices || voices.length === 0) return null;
+// Lista voces (puede estar vacía al inicio; por eso usamos waitForVoices)
+export function listVoices(): SpeechSynthesisVoice[] {
+  if (typeof window === 'undefined') return [];
+  const synth = window.speechSynthesis;
+  return synth?.getVoices?.() ?? [];
+}
 
-  // 1) exact match por URI
-  if (preferredURI) {
-    const byURI = voices.find((v) => v.voiceURI === preferredURI);
-    if (byURI) return byURI;
+// Espera a que el navegador cargue voces (Chrome a veces tarda)
+async function waitForVoices(timeoutMs = 2000): Promise<SpeechSynthesisVoice[]> {
+  const start = Date.now();
+
+  const current = listVoices();
+  if (current.length) return current;
+
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined') return resolve([]);
+
+    const synth = window.speechSynthesis;
+
+    const done = () => {
+      const v = listVoices();
+      resolve(v);
+    };
+
+    const tick = () => {
+      const v = listVoices();
+      if (v.length) return resolve(v);
+      if (Date.now() - start > timeoutMs) return resolve(v);
+      setTimeout(tick, 60);
+    };
+
+    // Algunos browsers disparan onvoiceschanged
+    try {
+      synth.onvoiceschanged = () => done();
+    } catch {}
+
+    tick();
+  });
+}
+
+// Normaliza a minúsculas para comparación
+function norm(s: string) {
+  return (s || '').toLowerCase();
+}
+
+// Elige una voz buena:
+// 1) si voiceURI existe y está en la lista, úsala
+// 2) si no, busca por lang exacto
+// 3) si no, busca por prefijo ('fr', 'es')
+// 4) si no, toma la primera disponible
+function pickVoice(
+  voices: SpeechSynthesisVoice[],
+  requestedURI: string | null,
+  lang: string
+): SpeechSynthesisVoice | undefined {
+  if (!voices.length) return undefined;
+
+  if (requestedURI) {
+    const exact = voices.find((v) => v.voiceURI === requestedURI);
+    if (exact) return exact;
   }
 
-  const langLower = (lang || '').toLowerCase();
+  const target = norm(lang);
 
-  // 2) match por idioma exacto (ej fr-FR)
-  const exactLang = voices.find((v) => (v.lang || '').toLowerCase() === langLower);
-  if (exactLang) return exactLang;
+  // 2) match exact lang
+  let v = voices.find((x) => norm(x.lang) === target);
+  if (v) return v;
 
-  // 3) match por prefijo (fr, es)
-  const prefix = langLower.split('-')[0];
-  if (prefix) {
-    const byPrefix = voices.find((v) => (v.lang || '').toLowerCase().startsWith(prefix));
-    if (byPrefix) return byPrefix;
+  // 3) match por prefijo (fr / es)
+  const prefix = target.split('-')[0];
+  v = voices.find((x) => norm(x.lang).startsWith(prefix));
+  if (v) return v;
+
+  // 3.5) heurística: prioriza voces “naturales” si existen (Google/Microsoft)
+  const preferredBrands = ['google', 'microsoft', 'natural', 'neur', 'online'];
+  const withPrefix = voices.filter((x) => norm(x.lang).startsWith(prefix));
+  if (withPrefix.length) {
+    const best = withPrefix.find((x) => preferredBrands.some((k) => norm(x.name).includes(k)));
+    return best ?? withPrefix[0];
   }
 
   // 4) fallback
   return voices[0];
 }
 
-/**
- * Habla un texto (TTS)
- */
+// Habla el texto
 export async function speak(text: string, options: SpeakOptions = {}) {
-  if (!isBrowser()) return;
+  if (typeof window === 'undefined') return;
 
   const synth = window.speechSynthesis;
+  if (!synth) return;
 
-  // Si hay algo hablando, lo cortamos para que sea claro
+  // Cancelar lo anterior para evitar voces “raras” por empalme
   try {
     synth.cancel();
   } catch {}
 
   const voices = await waitForVoices();
 
-  // Idioma default (tú dijiste: interfaz en francés; voz puede ser fr o es)
-  // Puedes cambiar esto a 'es-MX' si prefieres voz por default en español.
   const lang = options.lang ?? 'fr-FR';
 
-  const preferredURI = getPreferredVoiceURI();
-  const voice = pickVoice(voices, preferredURI, lang);
+  const requestedURI = options.voiceURI ?? getPreferredVoiceURI();
+  const voice = pickVoice(voices, requestedURI, lang);
 
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = lang;
